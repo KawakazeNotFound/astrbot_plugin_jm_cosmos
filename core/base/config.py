@@ -111,7 +111,7 @@ class JMConfigManager:
     @property
     def show_download_progress(self) -> bool:
         """是否发送下载进度消息"""
-        return self.plugin_config.get("show_download_progress", True)
+        return self.plugin_config.get("show_download_progress", False)
 
     @property
     def cover_recall_enabled(self) -> bool:

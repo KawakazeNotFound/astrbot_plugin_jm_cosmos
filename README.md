@@ -10,7 +10,7 @@
 
 <br>
 <div align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/VERSION-v2.7.6-E91E63?style=for-the-badge" alt="Version"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/VERSION-v2.7.7-E91E63?style=for-the-badge" alt="Version"></a>
   <a href="https://github.com/GEMILUXVII/astrbot_plugin_jm_cosmos/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-009688?style=for-the-badge" alt="License"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/PYTHON-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python"></a>
   <a href="https://github.com/AstrBotDevs/AstrBot"><img src="https://img.shields.io/badge/AstrBot-Compatible-00BFA5?style=for-the-badge&logo=robot&logoColor=white" alt="AstrBot Compatible"></a>
@@ -41,7 +41,7 @@ JM-Cosmos II 是一个基于 AstrBot 开发的 JM 漫画下载插件，支持漫
 
 - **漫画搜索** - 通过关键词搜索 JM 漫画，支持按标签/作者/角色/作品搜索
 - **漫画详情** - 查看漫画信息、标签、作者等
-- **本子下载** - 下载完整本子（/jm）或单章节（/jmc），支持实时进度提示
+- **本子下载** - 下载完整本子（/jm）或单章节（/jmc），下载任务排队执行并合并重复请求
 - **自动打包** - 下载完成后自动打包为 ZIP、PDF 或长图
 - **加密保护** - 支持为 ZIP/PDF 设置密码加密
 - **自动发送** - 打包后自动发送文件到聊天
@@ -312,7 +312,7 @@ pip install -r requirements.txt
 | `filename_show_password` | 文件名显示密码提示         | `false`        | 开启后文件名末尾添加 #PWxxx |
 | `auto_delete_after_send` | 发送后自动删除             | `true`         |  |
 | `send_cover_preview`     | 发送封面预览               | `true`         |  |
-| `show_download_progress` | 发送下载进度               | `true`         | 按 25% 步进推送，关闭可减少刷屏 |
+| `show_download_progress` | 发送下载进度               | `false`        | 默认关闭；开启后每 60 秒发送一次 |
 | `cover_recall_enabled`   | 封面消息自动撤回           | `false`        | 仅支持 QQ/NapCat 平台 |
 | `auto_recall_enabled`    | 文件消息自动撤回           | `false`        | 仅支持 QQ/NapCat 平台 |
 | `auto_recall_delay`      | 撤回延迟 (秒)              | `60`           | 建议 30-120 |
@@ -438,7 +438,7 @@ proxy_url: http://127.0.0.1:7890
 
 查看完整更新日志：[CHANGELOG.md](./CHANGELOG.md)
 
-**当前版本：v2.7.6** - 修复 NapCat 超时(retcode 1200)下封面/文件被重复发送
+**当前版本：v2.7.7** - 下载任务排队去重，进度提醒默认关闭并改为 60 秒间隔
 
 ## 注意事项
 

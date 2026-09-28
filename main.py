@@ -22,6 +22,7 @@ from .core import (
     SubscriptionManager,
     classify_exception,
 )
+from .core.download_queue import DownloadJobQueue
 from .utils import MessageFormatter, generate_album_filename, send_with_recall
 
 # 插件名称常量
@@ -32,7 +33,7 @@ PLUGIN_NAME = "jm_cosmos2"
     "jm_cosmos2",
     "GEMILUXVII",
     "JM漫画下载插件 - 支持搜索、下载禁漫天堂的漫画本子，支持加密PDF/ZIP打包",
-    "2.7.6",
+    "2.7.7",
     "https://github.com/GEMILUXVII/astrbot_plugin_jm_cosmos",
 )
 class JMCosmosPlugin(Star):
@@ -59,6 +60,7 @@ class JMCosmosPlugin(Star):
 
         # 初始化下载管理器
         self.download_manager = JMDownloadManager(self.config_manager)
+        self.download_queue = DownloadJobQueue()
 
         # 初始化浏览查询器
         self.browser = JMBrowser(self.config_manager)
@@ -166,6 +168,15 @@ class JMCosmosPlugin(Star):
 
         return _on_progress
 
+    @staticmethod
+    def _download_job_key(event: AstrMessageEvent, command: str, *target: str):
+        """同一会话、命令和目标只保留一个排队/运行中的任务。"""
+        return (
+            str(event.unified_msg_origin),
+            command,
+            *(str(value) for value in target),
+        )
+
     def _reserve_quota(self, event: AstrMessageEvent) -> tuple[bool, str, bool]:
         """
         下载前原子预留配额（管理员与不限额时跳过）。
@@ -227,14 +238,30 @@ class JMCosmosPlugin(Star):
             yield event.plain_result(MessageFormatter.format_error("invalid_id"))
             return
 
-        # 下载前原子预留配额（管理员/不限额时跳过）
-        ok, deny_msg, quota_reserved = self._reserve_quota(event)
-        if not ok:
-            yield event.plain_result(deny_msg)
+        ticket = await self.download_queue.enqueue(
+            self._download_job_key(event, "album", album_id)
+        )
+        if ticket is None:
+            yield event.plain_result(
+                "⏳ 相同本子下载已排队或正在处理，本次请求已合并。"
+            )
             return
 
         download_succeeded = False
+        quota_reserved = False
         try:
+            # 下载前原子预留配额（管理员/不限额时跳过）
+            ok, deny_msg, quota_reserved = self._reserve_quota(event)
+            if not ok:
+                yield event.plain_result(deny_msg)
+                return
+
+            if ticket.position > 1:
+                yield event.plain_result(
+                    f"📥 已加入下载队列，提交时前方有 {ticket.position - 1} 个任务。"
+                )
+            await ticket.acquire()
+
             # 发送开始下载提示
             yield event.plain_result(f"⏳ 开始下载本子 {album_id}，请稍候...")
 
@@ -361,6 +388,7 @@ class JMCosmosPlugin(Star):
         finally:
             if not download_succeeded:
                 self._refund_quota(event, quota_reserved)
+            await ticket.release()
 
     @filter.command("jmc")
     async def download_photo_command(
@@ -400,14 +428,30 @@ class JMCosmosPlugin(Star):
             yield event.plain_result("❌ 章节序号必须是数字")
             return
 
-        # 下载前原子预留配额（管理员/不限额时跳过）
-        ok, deny_msg, quota_reserved = self._reserve_quota(event)
-        if not ok:
-            yield event.plain_result(deny_msg)
+        ticket = await self.download_queue.enqueue(
+            self._download_job_key(event, "chapter", album_id, str(chapter_idx))
+        )
+        if ticket is None:
+            yield event.plain_result(
+                "⏳ 相同章节下载已排队或正在处理，本次请求已合并。"
+            )
             return
 
         download_succeeded = False
+        quota_reserved = False
         try:
+            # 下载前原子预留配额（管理员/不限额时跳过）
+            ok, deny_msg, quota_reserved = self._reserve_quota(event)
+            if not ok:
+                yield event.plain_result(deny_msg)
+                return
+
+            if ticket.position > 1:
+                yield event.plain_result(
+                    f"📥 已加入下载队列，提交时前方有 {ticket.position - 1} 个任务。"
+                )
+            await ticket.acquire()
+
             yield event.plain_result(
                 f"⏳ 正在获取本子 {album_id} 的第 {chapter_idx} 章节信息..."
             )
@@ -512,6 +556,7 @@ class JMCosmosPlugin(Star):
         finally:
             if not download_succeeded:
                 self._refund_quota(event, quota_reserved)
+            await ticket.release()
 
     @filter.command("jms")
     async def search_command(
@@ -1162,17 +1207,32 @@ class JMCosmosPlugin(Star):
             yield event.plain_result(MessageFormatter.format_error("invalid_id"))
             return
 
-        # 下载前原子预留配额（管理员/不限额时跳过）
-        ok, deny_msg, quota_reserved = self._reserve_quota(event)
-        if not ok:
-            yield event.plain_result(deny_msg)
+        ticket = await self.download_queue.enqueue(
+            self._download_job_key(event, "update", album_id)
+        )
+        if ticket is None:
+            yield event.plain_result(
+                "⏳ 相同增量下载已排队或正在处理，本次请求已合并。"
+            )
             return
 
-        umo = event.unified_msg_origin
-        skip = self.subscription_manager.get_last_count(umo, album_id) or 0
-
         download_succeeded = False
+        quota_reserved = False
         try:
+            # 下载前原子预留配额（管理员/不限额时跳过）
+            ok, deny_msg, quota_reserved = self._reserve_quota(event)
+            if not ok:
+                yield event.plain_result(deny_msg)
+                return
+
+            if ticket.position > 1:
+                yield event.plain_result(
+                    f"📥 已加入下载队列，提交时前方有 {ticket.position - 1} 个任务。"
+                )
+            await ticket.acquire()
+
+            umo = event.unified_msg_origin
+            skip = self.subscription_manager.get_last_count(umo, album_id) or 0
             yield event.plain_result(f"⏳ 正在检查本子 {album_id} 的更新...")
 
             detail = await self.browser.get_album_detail(album_id)
@@ -1233,6 +1293,7 @@ class JMCosmosPlugin(Star):
         finally:
             if not download_succeeded:
                 self._refund_quota(event, quota_reserved)
+            await ticket.release()
 
     async def _emit_packed_file(self, event: AstrMessageEvent, result, pack_result):
         """统一处理打包文件的发送（含自动撤回与清理），供下载类命令复用"""

@@ -141,7 +141,7 @@ class JMDownloadManager(JMClientMixin):
     async def download_album(
         self,
         album_id: str,
-        progress_callback: Callable[[int, int], Any] | None = None,
+        progress_callback: Callable[..., Any] | None = None,
         skip_photos: int = 0,
     ) -> DownloadResult:
         """
@@ -149,7 +149,7 @@ class JMDownloadManager(JMClientMixin):
 
         Args:
             album_id: 本子ID
-            progress_callback: 进度回调协程 (current, total)，按 25% 步进调用
+            progress_callback: 进度回调协程 (current, total, unit)，默认每 60 秒轮询一次
             skip_photos: 跳过前 N 个章节（用于增量下载新章节）
 
         Returns:
@@ -273,14 +273,14 @@ class JMDownloadManager(JMClientMixin):
     async def download_photo(
         self,
         photo_id: str,
-        progress_callback: Callable[[int, int], Any] | None = None,
+        progress_callback: Callable[..., Any] | None = None,
     ) -> DownloadResult:
         """
         异步下载章节
 
         Args:
             photo_id: 章节ID
-            progress_callback: 进度回调协程 (current, total)
+            progress_callback: 进度回调协程 (current, total, unit)，默认每 60 秒轮询一次
 
         Returns:
             DownloadResult 下载结果
@@ -396,7 +396,7 @@ class JMDownloadManager(JMClientMixin):
         self,
         sync_func: Callable[..., DownloadResult],
         args: tuple,
-        progress_callback: Callable[[int, int], Any] | None,
+        progress_callback: Callable[..., Any] | None,
     ) -> DownloadResult:
         """在线程池执行同步下载，并按需轮询下载器进度回调上层。"""
         progress_holder: dict = {}
@@ -410,16 +410,19 @@ class JMDownloadManager(JMClientMixin):
         task: asyncio.Task,
         progress_holder: dict,
         progress_callback: Callable[..., Any],
-        interval: float = 2.0,
+        interval: float = 60.0,
     ) -> None:
-        """轮询下载器进度，按 ~10% 步进回调（避免刷屏，又不至于最后一段长时间无反馈）。
+        """每隔一段时间轮询一次下载器进度并回调上层。
 
         进度口径由下载器的 progress_view 决定（多章节相册按章节、否则按图片），
-        回调签名为 (done, total, unit)。
+        回调签名为 (done, total, unit)。下载完成时由命令结果消息报告，不在这里
+        额外发送 100% 进度。
         """
-        last_bucket = -1
-        while not task.done():
-            await asyncio.sleep(interval)
+        while True:
+            done_tasks, _ = await asyncio.wait({task}, timeout=interval)
+            if task in done_tasks:
+                break
+
             downloader = progress_holder.get("downloader")
             view = getattr(downloader, "progress_view", None)
             if view is None:
@@ -427,10 +430,7 @@ class JMDownloadManager(JMClientMixin):
             done, total, unit = view()
             if total <= 0 or done <= 0 or done >= total:
                 continue
-            bucket = int(done * 10 / total)
-            if bucket != last_bucket:
-                last_bucket = bucket
-                try:
-                    await progress_callback(done, total, unit)
-                except Exception:
-                    pass
+            try:
+                await progress_callback(done, total, unit)
+            except Exception:
+                pass

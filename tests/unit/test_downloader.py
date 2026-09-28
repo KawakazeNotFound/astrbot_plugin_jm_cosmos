@@ -190,3 +190,40 @@ class TestResolveAllSuccess:
         assert _resolve_all_success(_FakeDownloader(False, False), 3) is True
         # 增量下载：存在真实下载失败 -> False
         assert _resolve_all_success(_FakeDownloader(False, True), 3) is False
+
+
+@pytest.mark.asyncio
+async def test_progress_polls_every_60_seconds(monkeypatch):
+    from core.downloader import JMDownloadManager
+
+    intervals = []
+    callbacks = []
+
+    async def fake_wait(tasks, timeout):
+        intervals.append(timeout)
+        if len(intervals) == 3:
+            return {task}, set()
+        return set(), set()
+
+    class FakeTask:
+        pass
+
+    task = FakeTask()
+
+    class FakeDownloader:
+        polls = 0
+
+        def progress_view(self):
+            self.polls += 1
+            return 5, 10, "图片"
+
+    async def progress_callback(done, total, unit):
+        callbacks.append((done, total, unit))
+
+    monkeypatch.setattr("core.downloader.asyncio.wait", fake_wait)
+    await JMDownloadManager._poll_progress(
+        task, {"downloader": FakeDownloader()}, progress_callback
+    )
+
+    assert intervals == [60.0, 60.0, 60.0]
+    assert callbacks == [(5, 10, "图片"), (5, 10, "图片")]

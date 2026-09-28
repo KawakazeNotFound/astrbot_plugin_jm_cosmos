@@ -101,8 +101,8 @@
   "show_download_progress": {
     "type": "bool",
     "description": "发送下载进度",
-    "hint": "下载本子时按 25% 步进推送进度消息，关闭可减少消息刷屏",
-    "default": true
+    "hint": "默认关闭；开启后每 60 秒发送一次下载进度",
+    "default": false
   },
   "cover_recall_enabled": {
     "type": "bool",

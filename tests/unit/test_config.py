@@ -54,6 +54,17 @@ class TestConfigManagerDefaults:
         """测试封面预览默认启用"""
         assert config_manager.send_cover_preview is True
 
+    def test_download_progress_disabled_by_default(self, config_manager):
+        """下载进度默认关闭，减少聊天消息"""
+        assert config_manager.show_download_progress is False
+
+    def test_download_progress_can_be_enabled(self, data_dir):
+        """显式开启时仍可发送进度"""
+        from core.base import JMConfigManager
+
+        manager = JMConfigManager({"show_download_progress": True}, data_dir)
+        assert manager.show_download_progress is True
+
     def test_admin_only_default(self, config_manager):
         """测试管理员限制默认禁用"""
         assert config_manager.admin_only is False
