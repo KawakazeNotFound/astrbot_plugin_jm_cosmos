@@ -5,6 +5,7 @@ JM-Cosmos II - AstrBot JM漫画下载插件
 """
 
 import asyncio
+from html import escape
 from pathlib import Path
 
 import astrbot.api.message_components as Comp
@@ -24,6 +25,7 @@ from .core import (
 )
 from .core.download_queue import DownloadJobQueue
 from .utils import MessageFormatter, generate_album_filename, send_with_recall
+from .utils.message_rendering import render_plain_segments, strip_leading_emoji_markers
 
 # 插件名称常量
 PLUGIN_NAME = "jm_cosmos2"
@@ -143,6 +145,77 @@ class JMCosmosPlugin(Star):
 
         return True, ""
 
+    async def _render_notification_card(self, data: dict) -> str | None:
+        """将通知渲染成 PNG 卡片；所有动态文本先做 HTML 转义。"""
+        renderer = getattr(self, "html_render", None)
+        if not callable(renderer):
+            return None
+
+        template_path = Path(__file__).parent / "templates" / "notification_card.html"
+        try:
+            template = template_path.read_text(encoding="utf-8")
+
+            def escape_data(value):
+                if isinstance(value, str):
+                    return escape(value, quote=True)
+                if isinstance(value, dict):
+                    return {key: escape_data(item) for key, item in value.items()}
+                if isinstance(value, (list, tuple)):
+                    return [escape_data(item) for item in value]
+                return value
+
+            safe_data = escape_data(data)
+            image = await renderer(
+                template,
+                safe_data,
+                return_url=True,
+                options={"type": "png"},
+            )
+            return str(image) if image else None
+        except Exception as exc:
+            logger.warning(f"渲染通知卡片失败: {exc}")
+            return None
+
+    async def _render_text_card(self, text: str) -> str | None:
+        """将普通提示文本渲染为卡片；展示时去掉行首装饰 emoji。"""
+        body = strip_leading_emoji_markers(str(text))
+        return await self._render_notification_card(
+            {
+                "card_type": "text",
+                "eyebrow": "JM COSMOS",
+                "heading": "消息提醒",
+                "body": body,
+                "footer": "JM COSMOS · 消息中心",
+            }
+        )
+
+    async def _render_message_chain(self, message_chain):
+        """只替换消息链里的 Plain 连续段，保留图片、引用和文件等组件。"""
+        from astrbot.api.event import MessageChain
+
+        components = getattr(message_chain, "chain", message_chain)
+        rendered = await render_plain_segments(
+            components,
+            self._render_text_card,
+            lambda component: (
+                isinstance(component, Comp.Plain)
+                or (isinstance(component, dict) and component.get("type") == "plain")
+            ),
+            Comp.Image.fromURL,
+        )
+        return MessageChain(rendered)
+
+    async def _text_result(self, event: AstrMessageEvent, text: str):
+        """普通提示优先返回卡片，渲染阶段出错时保留原始文本。"""
+        card = await self._render_text_card(str(text))
+        if card:
+            return event.chain_result([Comp.Image.fromURL(card)])
+        return event.plain_result(text)
+
+    async def _chain_result(self, event: AstrMessageEvent, components):
+        rendered = await self._render_message_chain(components)
+        return event.chain_result(rendered.chain)
+
     def _make_progress_callback(self, event: AstrMessageEvent):
         """构建下载进度回调（受配置开关控制），未启用时返回 None"""
         if not self.config_manager.show_download_progress:
@@ -152,8 +225,24 @@ class JMCosmosPlugin(Star):
 
         async def _on_progress(done: int, total: int, unit: str = "图片") -> None:
             try:
-                await event.send(
-                    MessageChain(
+                percent = max(0, min(100, int(done * 100 / total))) if total > 0 else 0
+                card = await self._render_notification_card(
+                    {
+                        "card_type": "progress",
+                        "eyebrow": "DOWNLOAD PROGRESS",
+                        "heading": "下载进度",
+                        "status": "下载中",
+                        "current": max(0, int(done)),
+                        "total": max(0, int(total)),
+                        "percent": percent,
+                        "unit": unit,
+                        "footer": "JM COSMOS · 下载任务",
+                    }
+                )
+                if card:
+                    chain = MessageChain([Comp.Image.fromURL(card)])
+                else:
+                    chain = MessageChain(
                         [
                             Comp.Plain(
                                 MessageFormatter.format_download_progress(
@@ -162,7 +251,7 @@ class JMCosmosPlugin(Star):
                             )
                         ]
                     )
-                )
+                await event.send(await self._render_message_chain(chain))
             except Exception as send_err:
                 logger.debug(f"发送下载进度失败: {send_err}")
 
@@ -207,7 +296,7 @@ class JMCosmosPlugin(Star):
     @filter.command("jmhelp")
     async def help_command(self, event: AstrMessageEvent):
         """显示帮助信息"""
-        yield event.plain_result(MessageFormatter.format_help())
+        yield await self._text_result(event, MessageFormatter.format_help())
 
     @filter.command("jm")
     async def download_album_command(
@@ -222,28 +311,30 @@ class JMCosmosPlugin(Star):
         # 权限检查
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         # 参数检查
         if album_id is None:
-            yield event.plain_result(
-                "❌ 请提供本子ID\n用法: /jm <ID>\n示例: /jm 123456"
+            yield await self._text_result(
+                event, "❌ 请提供本子ID\n用法: /jm <ID>\n示例: /jm 123456"
             )
             return
 
         # 转换为字符串并验证ID格式
         album_id = str(album_id).strip()
         if not album_id.isdigit():
-            yield event.plain_result(MessageFormatter.format_error("invalid_id"))
+            yield await self._text_result(
+                event, MessageFormatter.format_error("invalid_id")
+            )
             return
 
         ticket = await self.download_queue.enqueue(
             self._download_job_key(event, "album", album_id)
         )
         if ticket is None:
-            yield event.plain_result(
-                "⏳ 相同本子下载已排队或正在处理，本次请求已合并。"
+            yield await self._text_result(
+                event, "⏳ 相同本子下载已排队或正在处理，本次请求已合并。"
             )
             return
 
@@ -253,17 +344,20 @@ class JMCosmosPlugin(Star):
             # 下载前原子预留配额（管理员/不限额时跳过）
             ok, deny_msg, quota_reserved = self._reserve_quota(event)
             if not ok:
-                yield event.plain_result(deny_msg)
+                yield await self._text_result(event, deny_msg)
                 return
 
             if ticket.position > 1:
-                yield event.plain_result(
-                    f"📥 已加入下载队列，提交时前方有 {ticket.position - 1} 个任务。"
+                yield await self._text_result(
+                    event,
+                    f"📥 已加入下载队列，提交时前方有 {ticket.position - 1} 个任务。",
                 )
             await ticket.acquire()
 
             # 发送开始下载提示
-            yield event.plain_result(f"⏳ 开始下载本子 {album_id}，请稍候...")
+            yield await self._text_result(
+                event, f"⏳ 开始下载本子 {album_id}，请稍候..."
+            )
 
             # 如果配置了发送封面预览，获取详情和封面（预览失败不应中断下载）
             if self.config_manager.send_cover_preview:
@@ -292,14 +386,15 @@ class JMCosmosPlugin(Star):
                         if self.config_manager.cover_recall_enabled:
                             await send_with_recall(
                                 event,
-                                cover_chain,
+                                await self._render_message_chain(cover_chain),
                                 self.config_manager.auto_recall_delay,
+                                text_fallback_chain=cover_chain,
                             )
                         else:
-                            yield event.chain_result(cover_chain.chain)
+                            yield await self._chain_result(event, cover_chain.chain)
                     else:
-                        yield event.plain_result(
-                            MessageFormatter.format_album_info(detail)
+                        yield await self._text_result(
+                            event, MessageFormatter.format_album_info(detail)
                         )
 
             # 执行下载
@@ -308,10 +403,11 @@ class JMCosmosPlugin(Star):
             )
 
             if not result.success:
-                yield event.plain_result(
+                yield await self._text_result(
+                    event,
                     MessageFormatter.format_error(
                         "download_failed", result.error_message
-                    )
+                    ),
                 )
                 return
 
@@ -364,18 +460,19 @@ class JMCosmosPlugin(Star):
                 if self.config_manager.auto_recall_enabled:
                     await send_with_recall(
                         event,
-                        file_chain,
+                        await self._render_message_chain(file_chain),
                         self.config_manager.auto_recall_delay,
+                        text_fallback_chain=file_chain,
                     )
                 else:
-                    yield event.chain_result(file_chain.chain)
+                    yield await self._chain_result(event, file_chain.chain)
 
                 # 自动清理
                 if self.config_manager.auto_delete_after_send:
                     JMPacker.cleanup(result.save_path)
                     JMPacker.cleanup(pack_result.output_path)
             else:
-                yield event.plain_result(result_msg)
+                yield await self._text_result(event, result_msg)
 
         except Exception as e:
             logger.error(f"下载本子失败: {e}")
@@ -384,7 +481,9 @@ class JMCosmosPlugin(Star):
 
                 logger.error(traceback.format_exc())
             etype, emsg = classify_exception(e)
-            yield event.plain_result(MessageFormatter.format_error(etype, emsg))
+            yield await self._text_result(
+                event, MessageFormatter.format_error(etype, emsg)
+            )
         finally:
             if not download_succeeded:
                 self._refund_quota(event, quota_reserved)
@@ -403,37 +502,40 @@ class JMCosmosPlugin(Star):
         # 权限检查
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         # 参数检查
         if album_id is None or chapter_index is None:
-            yield event.plain_result(
-                "❌ 请提供本子ID和章节序号\n用法: /jmc <本子ID> <章节序号>\n示例: /jmc 123456 3"
+            yield await self._text_result(
+                event,
+                "❌ 请提供本子ID和章节序号\n用法: /jmc <本子ID> <章节序号>\n示例: /jmc 123456 3",
             )
             return
 
         album_id = str(album_id).strip()
         if not album_id.isdigit():
-            yield event.plain_result(MessageFormatter.format_error("invalid_id"))
+            yield await self._text_result(
+                event, MessageFormatter.format_error("invalid_id")
+            )
             return
 
         # 验证章节序号
         try:
             chapter_idx = int(chapter_index)
             if chapter_idx < 1:
-                yield event.plain_result("❌ 章节序号必须大于0")
+                yield await self._text_result(event, "❌ 章节序号必须大于0")
                 return
         except ValueError:
-            yield event.plain_result("❌ 章节序号必须是数字")
+            yield await self._text_result(event, "❌ 章节序号必须是数字")
             return
 
         ticket = await self.download_queue.enqueue(
             self._download_job_key(event, "chapter", album_id, str(chapter_idx))
         )
         if ticket is None:
-            yield event.plain_result(
-                "⏳ 相同章节下载已排队或正在处理，本次请求已合并。"
+            yield await self._text_result(
+                event, "⏳ 相同章节下载已排队或正在处理，本次请求已合并。"
             )
             return
 
@@ -443,17 +545,18 @@ class JMCosmosPlugin(Star):
             # 下载前原子预留配额（管理员/不限额时跳过）
             ok, deny_msg, quota_reserved = self._reserve_quota(event)
             if not ok:
-                yield event.plain_result(deny_msg)
+                yield await self._text_result(event, deny_msg)
                 return
 
             if ticket.position > 1:
-                yield event.plain_result(
-                    f"📥 已加入下载队列，提交时前方有 {ticket.position - 1} 个任务。"
+                yield await self._text_result(
+                    event,
+                    f"📥 已加入下载队列，提交时前方有 {ticket.position - 1} 个任务。",
                 )
             await ticket.acquire()
 
-            yield event.plain_result(
-                f"⏳ 正在获取本子 {album_id} 的第 {chapter_idx} 章节信息..."
+            yield await self._text_result(
+                event, f"⏳ 正在获取本子 {album_id} 的第 {chapter_idx} 章节信息..."
             )
 
             # 获取章节的真正 photo_id
@@ -462,17 +565,18 @@ class JMCosmosPlugin(Star):
             )
 
             if chapter_info is None:
-                yield event.plain_result(
-                    f"❌ 第 {chapter_idx} 章节不存在，请检查章节序号"
+                yield await self._text_result(
+                    event, f"❌ 第 {chapter_idx} 章节不存在，请检查章节序号"
                 )
                 return
 
             photo_id, photo_title, total_chapters = chapter_info
 
-            yield event.plain_result(
+            yield await self._text_result(
+                event,
                 f"📖 找到章节: {photo_title}\n"
                 f"📚 章节: {chapter_idx}/{total_chapters}\n"
-                f"⏳ 开始下载..."
+                f"⏳ 开始下载...",
             )
 
             # 使用真正的 photo_id 下载
@@ -481,10 +585,11 @@ class JMCosmosPlugin(Star):
             )
 
             if not result.success:
-                yield event.plain_result(
+                yield await self._text_result(
+                    event,
                     MessageFormatter.format_error(
                         "download_failed", result.error_message
-                    )
+                    ),
                 )
                 return
 
@@ -537,22 +642,25 @@ class JMCosmosPlugin(Star):
                 if self.config_manager.auto_recall_enabled:
                     await send_with_recall(
                         event,
-                        file_chain,
+                        await self._render_message_chain(file_chain),
                         self.config_manager.auto_recall_delay,
+                        text_fallback_chain=file_chain,
                     )
                 else:
-                    yield event.chain_result(file_chain.chain)
+                    yield await self._chain_result(event, file_chain.chain)
 
                 if self.config_manager.auto_delete_after_send:
                     JMPacker.cleanup(result.save_path)
                     JMPacker.cleanup(pack_result.output_path)
             else:
-                yield event.plain_result(result_msg)
+                yield await self._text_result(event, result_msg)
 
         except Exception as e:
             logger.error(f"下载章节失败: {e}")
             etype, emsg = classify_exception(e)
-            yield event.plain_result(MessageFormatter.format_error(etype, emsg))
+            yield await self._text_result(
+                event, MessageFormatter.format_error(etype, emsg)
+            )
         finally:
             if not download_succeeded:
                 self._refund_quota(event, quota_reserved)
@@ -573,20 +681,21 @@ class JMCosmosPlugin(Star):
         # 权限检查
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         if keyword is None:
-            yield event.plain_result(
+            yield await self._text_result(
+                event,
                 "❌ 请提供搜索关键词\n用法: /jms <关键词> [页码]\n"
                 "搜索类型: tag:标签 author:作者 actor:角色 work:作品\n"
-                "示例: /jms 标签名\n示例: /jms tag:全彩 2"
+                "示例: /jms 标签名\n示例: /jms tag:全彩 2",
             )
             return
 
         raw_query = str(keyword).strip()
         if not raw_query:
-            yield event.plain_result("❌ 搜索关键词不能为空")
+            yield await self._text_result(event, "❌ 搜索关键词不能为空")
             return
 
         # 解析搜索类型前缀（tag:/author:/actor:/work:），默认综合搜索
@@ -599,7 +708,7 @@ class JMCosmosPlugin(Star):
                 break
 
         if not search_term:
-            yield event.plain_result("❌ 搜索关键词不能为空")
+            yield await self._text_result(event, "❌ 搜索关键词不能为空")
             return
 
         # 验证页码
@@ -614,8 +723,8 @@ class JMCosmosPlugin(Star):
             from .core.constants import SEARCH_MODE_NAMES
 
             mode_name = SEARCH_MODE_NAMES.get(mode, "综合")
-            yield event.plain_result(
-                f"🔍 正在搜索[{mode_name}]: {search_term} (第{page}页)..."
+            yield await self._text_result(
+                event, f"🔍 正在搜索[{mode_name}]: {search_term} (第{page}页)..."
             )
 
             results = await self.browser.search_albums(search_term, page, mode)
@@ -628,12 +737,14 @@ class JMCosmosPlugin(Star):
             result_msg = MessageFormatter.format_search_results(
                 results, raw_query, page
             )
-            yield event.plain_result(result_msg)
+            yield await self._text_result(event, result_msg)
 
         except Exception as e:
             logger.error(f"搜索失败: {e}")
             etype, emsg = classify_exception(e)
-            yield event.plain_result(MessageFormatter.format_error(etype, emsg))
+            yield await self._text_result(
+                event, MessageFormatter.format_error(etype, emsg)
+            )
 
     @filter.command("jmi")
     async def info_command(self, event: AstrMessageEvent, album_id: str = None):
@@ -646,27 +757,33 @@ class JMCosmosPlugin(Star):
         # 权限检查
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         if album_id is None:
-            yield event.plain_result(
-                "❌ 请提供本子ID\n用法: /jmi <ID>\n示例: /jmi 123456"
+            yield await self._text_result(
+                event, "❌ 请提供本子ID\n用法: /jmi <ID>\n示例: /jmi 123456"
             )
             return
 
         album_id = str(album_id).strip()
         if not album_id.isdigit():
-            yield event.plain_result(MessageFormatter.format_error("invalid_id"))
+            yield await self._text_result(
+                event, MessageFormatter.format_error("invalid_id")
+            )
             return
 
         try:
-            yield event.plain_result(f"📖 正在获取本子 {album_id} 的详情...")
+            yield await self._text_result(
+                event, f"📖 正在获取本子 {album_id} 的详情..."
+            )
 
             detail = await self.browser.get_album_detail(album_id)
 
             if not detail:
-                yield event.plain_result(MessageFormatter.format_error("not_found"))
+                yield await self._text_result(
+                    event, MessageFormatter.format_error("not_found")
+                )
                 return
 
             # 根据配置决定是否发送封面图片
@@ -689,20 +806,27 @@ class JMCosmosPlugin(Star):
                     if self.config_manager.cover_recall_enabled:
                         await send_with_recall(
                             event,
-                            cover_chain,
+                            await self._render_message_chain(cover_chain),
                             self.config_manager.auto_recall_delay,
+                            text_fallback_chain=cover_chain,
                         )
                     else:
-                        yield event.chain_result(cover_chain.chain)
+                        yield await self._chain_result(event, cover_chain.chain)
                 else:
-                    yield event.plain_result(MessageFormatter.format_album_info(detail))
+                    yield await self._text_result(
+                        event, MessageFormatter.format_album_info(detail)
+                    )
             else:
-                yield event.plain_result(MessageFormatter.format_album_info(detail))
+                yield await self._text_result(
+                    event, MessageFormatter.format_album_info(detail)
+                )
 
         except Exception as e:
             logger.error(f"获取详情失败: {e}")
             etype, emsg = classify_exception(e)
-            yield event.plain_result(MessageFormatter.format_error(etype, emsg))
+            yield await self._text_result(
+                event, MessageFormatter.format_error(etype, emsg)
+            )
 
     @filter.command("jmrank")
     async def ranking_command(
@@ -721,7 +845,7 @@ class JMCosmosPlugin(Star):
         # 权限检查
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         from .core.browser import JMBrowser
@@ -744,10 +868,11 @@ class JMCosmosPlugin(Star):
             elif arg_lower in categories:
                 category = arg_lower
             else:
-                yield event.plain_result(
+                yield await self._text_result(
+                    event,
                     f"❌ 无效参数: {arg}\n"
                     "用法: /jmrank [day/week/month] [分类] [页码]\n"
-                    "示例: /jmrank week hanman 1"
+                    "示例: /jmrank week hanman 1",
                 )
                 return
 
@@ -756,8 +881,8 @@ class JMCosmosPlugin(Star):
             type_name = type_names.get(ranking_type, "周")
             cat_name = MessageFormatter.CATEGORY_NAMES.get(category, category)
             cat_prefix = "" if category == "all" else f"{cat_name}·"
-            yield event.plain_result(
-                f"🏆 正在获取{cat_prefix}{type_name}排行榜第{page}页..."
+            yield await self._text_result(
+                event, f"🏆 正在获取{cat_prefix}{type_name}排行榜第{page}页..."
             )
 
             if ranking_type == "day":
@@ -774,12 +899,14 @@ class JMCosmosPlugin(Star):
             result_msg = MessageFormatter.format_ranking_results(
                 results, ranking_type, page, category
             )
-            yield event.plain_result(result_msg)
+            yield await self._text_result(event, result_msg)
 
         except Exception as e:
             logger.error(f"获取排行榜失败: {e}")
             etype, emsg = classify_exception(e)
-            yield event.plain_result(MessageFormatter.format_error(etype, emsg))
+            yield await self._text_result(
+                event, MessageFormatter.format_error(etype, emsg)
+            )
 
     @filter.command("jmrec")
     async def recommend_command(
@@ -799,7 +926,7 @@ class JMCosmosPlugin(Star):
         # 权限检查
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         # 支持的参数值
@@ -822,7 +949,9 @@ class JMCosmosPlugin(Star):
 
         # 如果第一个参数是 help，显示帮助
         if arg1 and arg1.lower() == "help":
-            yield event.plain_result(MessageFormatter.format_recommend_help())
+            yield await self._text_result(
+                event, MessageFormatter.format_recommend_help()
+            )
             return
 
         # 智能解析参数（按顺序：分类 -> 排序 -> 时间 -> 页码）
@@ -843,10 +972,11 @@ class JMCosmosPlugin(Star):
             # 尝试匹配分类
             if arg_lower in categories:
                 if category_set:
-                    yield event.plain_result(
+                    yield await self._text_result(
+                        event,
                         f"❌ 检测到重复的分类参数: {arg}\n"
                         f"当前已设置分类为: {category}\n"
-                        f"💡 每种类型只能指定一个参数"
+                        f"💡 每种类型只能指定一个参数",
                     )
                     return
                 category = arg_lower
@@ -856,10 +986,11 @@ class JMCosmosPlugin(Star):
             # 尝试匹配排序
             if arg_lower in orders:
                 if order_set:
-                    yield event.plain_result(
+                    yield await self._text_result(
+                        event,
                         f"❌ 检测到重复的排序参数: {arg}\n"
                         f"当前已设置排序为: {order_by}\n"
-                        f"💡 每种类型只能指定一个参数"
+                        f"💡 每种类型只能指定一个参数",
                     )
                     return
                 order_by = arg_lower
@@ -869,10 +1000,11 @@ class JMCosmosPlugin(Star):
             # 尝试匹配时间
             if arg_lower in times:
                 if time_set:
-                    yield event.plain_result(
+                    yield await self._text_result(
+                        event,
                         f"❌ 检测到重复的时间参数: {arg}\n"
                         f"当前已设置时间为: {time_range}\n"
-                        f"💡 每种类型只能指定一个参数"
+                        f"💡 每种类型只能指定一个参数",
                     )
                     return
                 time_range = arg_lower
@@ -880,8 +1012,8 @@ class JMCosmosPlugin(Star):
                 continue
 
             # 未知参数，显示帮助提示
-            yield event.plain_result(
-                f"❌ 未知参数: {arg}\n💡 使用 /jmrec help 查看帮助"
+            yield await self._text_result(
+                event, f"❌ 未知参数: {arg}\n💡 使用 /jmrec help 查看帮助"
             )
             return
 
@@ -890,8 +1022,8 @@ class JMCosmosPlugin(Star):
             cat_name = MessageFormatter.CATEGORY_NAMES.get(category, category)
             order_name = MessageFormatter.ORDER_NAMES.get(order_by, order_by)
             time_name = MessageFormatter.TIME_NAMES.get(time_range, time_range)
-            yield event.plain_result(
-                f"🎯 正在获取 {cat_name} · {time_name}{order_name} 第{page}页..."
+            yield await self._text_result(
+                event, f"🎯 正在获取 {cat_name} · {time_name}{order_name} 第{page}页..."
             )
 
             # 获取推荐内容
@@ -910,7 +1042,7 @@ class JMCosmosPlugin(Star):
             result_msg = MessageFormatter.format_recommend_results(
                 results, category, order_by, time_range, page
             )
-            yield event.plain_result(result_msg)
+            yield await self._text_result(event, result_msg)
 
         except Exception as e:
             logger.error(f"获取推荐内容失败: {e}")
@@ -919,7 +1051,9 @@ class JMCosmosPlugin(Star):
 
                 logger.error(traceback.format_exc())
             etype, emsg = classify_exception(e)
-            yield event.plain_result(MessageFormatter.format_error(etype, emsg))
+            yield await self._text_result(
+                event, MessageFormatter.format_error(etype, emsg)
+            )
 
     @filter.command("jmlogin")
     async def login_command(
@@ -934,39 +1068,43 @@ class JMCosmosPlugin(Star):
         # 权限检查
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         # 安全：禁止在群聊中登录，避免账号密码暴露在群消息/历史/日志中
         if event.get_group_id():
-            yield event.plain_result(
+            yield await self._text_result(
+                event,
                 "⚠️ 出于安全考虑，请勿在群聊中发送账号密码\n"
                 "请私聊机器人使用 /jmlogin <用户名> <密码>\n"
                 "💡 也可在管理面板配置账号密码实现自动登录\n"
-                "建议尽快撤回上面包含密码的消息"
+                "建议尽快撤回上面包含密码的消息",
             )
             return
 
         # 参数检查
         if username is None or password is None:
-            yield event.plain_result(
-                "❌ 请提供用户名和密码\n用法: /jmlogin <用户名> <密码>\n示例: /jmlogin myuser mypass"
+            yield await self._text_result(
+                event,
+                "❌ 请提供用户名和密码\n用法: /jmlogin <用户名> <密码>\n示例: /jmlogin myuser mypass",
             )
             return
 
         try:
-            yield event.plain_result("🔐 正在登录...")
+            yield await self._text_result(event, "🔐 正在登录...")
 
             success, message = await self.auth_manager.login(username, password)
 
             if success:
-                yield event.plain_result(f"✅ {message}")
+                yield await self._text_result(event, f"✅ {message}")
             else:
-                yield event.plain_result(f"❌ {message}")
+                yield await self._text_result(event, f"❌ {message}")
 
         except Exception as e:
             logger.error(f"登录失败: {e}")
-            yield event.plain_result(MessageFormatter.format_error("network", str(e)))
+            yield await self._text_result(
+                event, MessageFormatter.format_error("network", str(e))
+            )
 
     @filter.command("jmlogout")
     async def logout_command(self, event: AstrMessageEvent):
@@ -978,15 +1116,15 @@ class JMCosmosPlugin(Star):
         # 权限检查
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         success, message = self.auth_manager.logout()
 
         if success:
-            yield event.plain_result(f"✅ {message}")
+            yield await self._text_result(event, f"✅ {message}")
         else:
-            yield event.plain_result(f"❌ {message}")
+            yield await self._text_result(event, f"❌ {message}")
 
     @filter.command("jmstatus")
     async def status_command(self, event: AstrMessageEvent):
@@ -998,16 +1136,18 @@ class JMCosmosPlugin(Star):
         # 权限检查
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         status = self.auth_manager.get_login_status()
 
         if status["logged_in"]:
-            yield event.plain_result(f"✅ 已登录\n👤 用户名: {status['username']}")
+            yield await self._text_result(
+                event, f"✅ 已登录\n👤 用户名: {status['username']}"
+            )
         else:
-            yield event.plain_result(
-                "❌ 当前未登录\n💡 使用 /jmlogin <用户名> <密码> 登录"
+            yield await self._text_result(
+                event, "❌ 当前未登录\n💡 使用 /jmlogin <用户名> <密码> 登录"
             )
 
     @filter.command("jmfav")
@@ -1028,13 +1168,15 @@ class JMCosmosPlugin(Star):
         # 权限检查
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         # 检查登录状态
         logged_in, login_msg = await self.auth_manager.ensure_logged_in()
         if not logged_in:
-            yield event.plain_result(f"❌ {login_msg}\n💡 请先使用 /jmlogin 登录")
+            yield await self._text_result(
+                event, f"❌ {login_msg}\n💡 请先使用 /jmlogin 登录"
+            )
             return
 
         client = self.auth_manager.get_client()
@@ -1046,25 +1188,28 @@ class JMCosmosPlugin(Star):
             album_id = str(arg2).strip() if arg2 is not None else ""
             if not album_id.isdigit():
                 verb = "add" if is_add else "del"
-                yield event.plain_result(
+                yield await self._text_result(
+                    event,
                     f"❌ 请提供有效的本子ID\n用法: /jmfav {verb} <本子ID>\n"
-                    f"示例: /jmfav {verb} 123456"
+                    f"示例: /jmfav {verb} 123456",
                 )
                 return
 
             if is_add:
-                yield event.plain_result(f"⭐ 正在收藏本子 {album_id}...")
+                yield await self._text_result(event, f"⭐ 正在收藏本子 {album_id}...")
                 success, msg = await self.browser.add_favorite(client, album_id)
                 fail_prefix = "收藏失败"
             else:
-                yield event.plain_result(f"🗑️ 正在取消收藏本子 {album_id}...")
+                yield await self._text_result(
+                    event, f"🗑️ 正在取消收藏本子 {album_id}..."
+                )
                 success, msg = await self.browser.remove_favorite(client, album_id)
                 fail_prefix = "取消收藏失败"
 
             if success:
-                yield event.plain_result(f"✅ {msg}")
+                yield await self._text_result(event, f"✅ {msg}")
             else:
-                yield event.plain_result(f"❌ {fail_prefix}: {msg}")
+                yield await self._text_result(event, f"❌ {fail_prefix}: {msg}")
             return
 
         # 默认：查看收藏夹
@@ -1079,19 +1224,21 @@ class JMCosmosPlugin(Star):
             folder_id = str(arg2).strip() or "0"
 
         try:
-            yield event.plain_result(f"⭐ 正在获取收藏夹第{page}页...")
+            yield await self._text_result(event, f"⭐ 正在获取收藏夹第{page}页...")
 
             albums, folders = await self.browser.get_favorites(
                 client, page, folder_id, self.auth_manager.current_user or ""
             )
 
             result_msg = MessageFormatter.format_favorites(albums, folders, page)
-            yield event.plain_result(result_msg)
+            yield await self._text_result(event, result_msg)
 
         except Exception as e:
             logger.error(f"获取收藏夹失败: {e}")
             etype, emsg = classify_exception(e)
-            yield event.plain_result(MessageFormatter.format_error(etype, emsg))
+            yield await self._text_result(
+                event, MessageFormatter.format_error(etype, emsg)
+            )
 
     # ==================== 订阅功能 ====================
 
@@ -1104,34 +1251,40 @@ class JMCosmosPlugin(Star):
         """
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         if album_id is None:
-            yield event.plain_result("❌ 请提供本子ID\n用法: /jmsub <ID>")
+            yield await self._text_result(event, "请提供本子ID\n用法: /jmsub <ID>")
             return
 
         album_id = str(album_id).strip()
         if not album_id.isdigit():
-            yield event.plain_result(MessageFormatter.format_error("invalid_id"))
+            yield await self._text_result(
+                event, MessageFormatter.format_error("invalid_id")
+            )
             return
 
         umo = event.unified_msg_origin
         if self.subscription_manager.exists(umo, album_id):
-            yield event.plain_result(f"ℹ️ 本会话已订阅本子 {album_id}")
+            yield await self._text_result(event, f"本会话已订阅漫画 {album_id}")
             return
 
-        yield event.plain_result(f"🔔 正在订阅本子 {album_id}...")
+        yield await self._text_result(event, f"正在订阅漫画 {album_id}…")
 
         try:
             detail = await self.browser.get_album_detail(album_id)
         except Exception as e:
             logger.error(f"订阅时获取详情失败: {e}")
             etype, emsg = classify_exception(e)
-            yield event.plain_result(MessageFormatter.format_error(etype, emsg))
+            yield await self._text_result(
+                event, MessageFormatter.format_error(etype, emsg)
+            )
             return
         if not detail:
-            yield event.plain_result(MessageFormatter.format_error("not_found"))
+            yield await self._text_result(
+                event, MessageFormatter.format_error("not_found")
+            )
             return
 
         title = detail.get("title", "")
@@ -1140,13 +1293,27 @@ class JMCosmosPlugin(Star):
             umo, album_id, event.get_sender_id(), title, count
         )
         if ok:
-            yield event.plain_result(
-                f"✅ 已订阅【{album_id}】{title}\n"
-                f"当前章节: {count}\n"
-                f"有更新会在本会话提醒"
+            card = await self._render_notification_card(
+                {
+                    "card_type": "status",
+                    "eyebrow": "SUBSCRIPTION",
+                    "heading": "已加入订阅",
+                    "title": title or f"漫画 {album_id}",
+                    "album_id": album_id,
+                    "detail": f"当前记录 {count} 个章节",
+                    "footer": "有新章节时，本会话会收到更新通知",
+                }
             )
+            if card:
+                yield event.image_result(card)
+            else:
+                yield await self._text_result(
+                    event,
+                    f"已订阅漫画 {album_id}：{title}\n"
+                    f"当前记录 {count} 个章节；有更新时会在本会话通知。",
+                )
         else:
-            yield event.plain_result("❌ 订阅失败，请稍后重试")
+            yield await self._text_result(event, "订阅失败，请稍后重试")
 
     @filter.command("jmunsub")
     async def unsubscribe_command(self, event: AstrMessageEvent, album_id: str = None):
@@ -1157,19 +1324,33 @@ class JMCosmosPlugin(Star):
         """
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         if album_id is None:
-            yield event.plain_result("❌ 请提供本子ID\n用法: /jmunsub <ID>")
+            yield await self._text_result(event, "请提供本子ID\n用法: /jmunsub <ID>")
             return
 
         album_id = str(album_id).strip()
         umo = event.unified_msg_origin
         if self.subscription_manager.remove(umo, album_id):
-            yield event.plain_result(f"✅ 已取消订阅本子 {album_id}")
+            card = await self._render_notification_card(
+                {
+                    "card_type": "status",
+                    "eyebrow": "SUBSCRIPTION",
+                    "heading": "已取消订阅",
+                    "title": f"漫画 {album_id}",
+                    "album_id": album_id,
+                    "detail": "此漫画后续更新将不再推送",
+                    "footer": "需要时可再次使用 /jmsub 订阅",
+                }
+            )
+            if card:
+                yield event.image_result(card)
+            else:
+                yield await self._text_result(event, f"已取消订阅漫画 {album_id}")
         else:
-            yield event.plain_result(f"ℹ️ 本会话未订阅本子 {album_id}")
+            yield await self._text_result(event, f"本会话未订阅漫画 {album_id}")
 
     @filter.command("jmsublist")
     async def subscription_list_command(self, event: AstrMessageEvent):
@@ -1180,11 +1361,26 @@ class JMCosmosPlugin(Star):
         """
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         subs = self.subscription_manager.list_for(event.unified_msg_origin)
-        yield event.plain_result(MessageFormatter.format_subscriptions(subs))
+        card = await self._render_notification_card(
+            {
+                "card_type": "subscription_list",
+                "eyebrow": "YOUR LIBRARY",
+                "heading": "我的订阅",
+                "rows": subs,
+                "total": len(subs),
+                "footer": "/jmsub <ID> 订阅　·　/jmunsub <ID> 取消",
+            }
+        )
+        if card:
+            yield event.image_result(card)
+        else:
+            yield await self._text_result(
+                event, MessageFormatter.format_subscriptions(subs)
+            )
 
     @filter.command("jmupdate")
     async def update_command(self, event: AstrMessageEvent, album_id: str = None):
@@ -1195,24 +1391,28 @@ class JMCosmosPlugin(Star):
         """
         has_perm, error_msg = self._check_permission(event)
         if not has_perm:
-            yield event.plain_result(error_msg)
+            yield await self._text_result(event, error_msg)
             return
 
         if album_id is None:
-            yield event.plain_result("❌ 请提供本子ID\n用法: /jmupdate <ID>")
+            yield await self._text_result(
+                event, "❌ 请提供本子ID\n用法: /jmupdate <ID>"
+            )
             return
 
         album_id = str(album_id).strip()
         if not album_id.isdigit():
-            yield event.plain_result(MessageFormatter.format_error("invalid_id"))
+            yield await self._text_result(
+                event, MessageFormatter.format_error("invalid_id")
+            )
             return
 
         ticket = await self.download_queue.enqueue(
             self._download_job_key(event, "update", album_id)
         )
         if ticket is None:
-            yield event.plain_result(
-                "⏳ 相同增量下载已排队或正在处理，本次请求已合并。"
+            yield await self._text_result(
+                event, "⏳ 相同增量下载已排队或正在处理，本次请求已合并。"
             )
             return
 
@@ -1222,44 +1422,50 @@ class JMCosmosPlugin(Star):
             # 下载前原子预留配额（管理员/不限额时跳过）
             ok, deny_msg, quota_reserved = self._reserve_quota(event)
             if not ok:
-                yield event.plain_result(deny_msg)
+                yield await self._text_result(event, deny_msg)
                 return
 
             if ticket.position > 1:
-                yield event.plain_result(
-                    f"📥 已加入下载队列，提交时前方有 {ticket.position - 1} 个任务。"
+                yield await self._text_result(
+                    event,
+                    f"📥 已加入下载队列，提交时前方有 {ticket.position - 1} 个任务。",
                 )
             await ticket.acquire()
 
             umo = event.unified_msg_origin
             skip = self.subscription_manager.get_last_count(umo, album_id) or 0
-            yield event.plain_result(f"⏳ 正在检查本子 {album_id} 的更新...")
+            yield await self._text_result(
+                event, f"⏳ 正在检查本子 {album_id} 的更新..."
+            )
 
             detail = await self.browser.get_album_detail(album_id)
             if not detail:
-                yield event.plain_result(MessageFormatter.format_error("not_found"))
+                yield await self._text_result(
+                    event, MessageFormatter.format_error("not_found")
+                )
                 return
 
             current = int(detail.get("photo_count", 0) or 0)
             if skip and current <= skip:
-                yield event.plain_result(
-                    f"✅ 本子 {album_id} 暂无新章节（当前 {current} 章）"
+                yield await self._text_result(
+                    event, f"✅ 本子 {album_id} 暂无新章节（当前 {current} 章）"
                 )
                 return
 
             new_chapters = current - skip if skip else current
             scope = f"新增 {new_chapters} 章" if skip else "全部章节"
-            yield event.plain_result(f"📥 开始下载{scope}...")
+            yield await self._text_result(event, f"📥 开始下载{scope}...")
 
             result = await self.download_manager.download_album(
                 album_id, self._make_progress_callback(event), skip
             )
 
             if not result.success:
-                yield event.plain_result(
+                yield await self._text_result(
+                    event,
                     MessageFormatter.format_error(
                         "download_failed", result.error_message
-                    )
+                    ),
                 )
                 return
 
@@ -1289,7 +1495,9 @@ class JMCosmosPlugin(Star):
         except Exception as e:
             logger.error(f"增量下载失败: {e}")
             etype, emsg = classify_exception(e)
-            yield event.plain_result(MessageFormatter.format_error(etype, emsg))
+            yield await self._text_result(
+                event, MessageFormatter.format_error(etype, emsg)
+            )
         finally:
             if not download_succeeded:
                 self._refund_quota(event, quota_reserved)
@@ -1318,16 +1526,19 @@ class JMCosmosPlugin(Star):
 
             if self.config_manager.auto_recall_enabled:
                 await send_with_recall(
-                    event, file_chain, self.config_manager.auto_recall_delay
+                    event,
+                    await self._render_message_chain(file_chain),
+                    self.config_manager.auto_recall_delay,
+                    text_fallback_chain=file_chain,
                 )
             else:
-                yield event.chain_result(file_chain.chain)
+                yield await self._chain_result(event, file_chain.chain)
 
             if self.config_manager.auto_delete_after_send:
                 JMPacker.cleanup(result.save_path)
                 JMPacker.cleanup(pack_result.output_path)
         else:
-            yield event.plain_result(result_msg)
+            yield await self._text_result(event, result_msg)
 
     # ==================== 订阅后台检查 ====================
 
@@ -1381,14 +1592,35 @@ class JMCosmosPlugin(Star):
         """向订阅会话推送更新通知"""
         from astrbot.api.event import MessageChain
 
+        command = f"/jmupdate {album_id}"
+        card = await self._render_notification_card(
+            {
+                "card_type": "update",
+                "eyebrow": "NEW CHAPTERS",
+                "heading": "订阅更新",
+                "title": title or f"漫画 {album_id}",
+                "album_id": album_id,
+                "from_count": max(0, int(last)),
+                "to_count": max(0, int(current)),
+                "command": command,
+                "footer": "获取新增章节",
+            }
+        )
+        display_title = title or f"漫画 {album_id}"
         text = (
-            f"🔔 订阅更新\n"
-            f"【{album_id}】{title}\n"
-            f"章节: {last} → {current}\n"
-            f"💡 /jmupdate {album_id} 获取新章节，或 /jm {album_id} 下载全部"
+            f"订阅更新：{display_title}\n"
+            f"漫画 ID：{album_id}\n"
+            f"章节数：{last} → {current}\n"
+            f"获取新增章节：{command}"
         )
         try:
-            await self.context.send_message(umo, MessageChain([Comp.Plain(text)]))
+            if card:
+                chain = MessageChain([Comp.Image.fromURL(card)])
+            else:
+                chain = MessageChain([Comp.Plain(text)])
+            await self.context.send_message(
+                umo, await self._render_message_chain(chain)
+            )
         except Exception as e:
             logger.warning(f"发送订阅更新通知失败: {e}")
 

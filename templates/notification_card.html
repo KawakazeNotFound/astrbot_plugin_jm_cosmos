@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 26px;
+      background: #f1efe9;
+      color: #202321;
+      font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    }
+    .card {
+      width: 620px;
+      padding: 30px 34px 26px;
+      overflow: hidden;
+      background: #fffefa;
+      border: 1px solid #e5e0d6;
+      border-radius: 18px;
+      box-shadow: 0 12px 34px rgba(38, 35, 29, .08);
+    }
+    .masthead, .footer, .row, .chapter-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .masthead { padding-bottom: 18px; border-bottom: 1px solid #e9e5dc; }
+    .brand, .eyebrow, .meta-label, .footer {
+      color: #77766f;
+      font-size: 12px;
+      letter-spacing: .12em;
+    }
+    .brand { color: #292d29; font-weight: 700; }
+    .brand-mark {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      margin-right: 8px;
+      background: #bf563d;
+      border-radius: 50%;
+      vertical-align: 1px;
+    }
+    .eyebrow { color: #a34f3b; font-weight: 700; }
+    h1 {
+      margin: 24px 0 8px;
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .album-id { margin: 0; color: #77766f; font-size: 14px; }
+    .details {
+      margin-top: 24px;
+      padding: 19px 20px;
+      background: #f6f4ee;
+      border-radius: 12px;
+    }
+    .meta-label { letter-spacing: .04em; }
+    .meta-value { margin-top: 7px; font-size: 19px; font-weight: 650; }
+    .chapter-line { gap: 16px; }
+    .arrow { color: #a34f3b; font-size: 20px; }
+    .footer {
+      justify-content: flex-start;
+      gap: 9px;
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid #e9e5dc;
+      letter-spacing: .02em;
+    }
+    .footer-accent { color: #a34f3b; font-weight: 700; }
+    .list { margin-top: 20px; }
+    .row {
+      gap: 16px;
+      padding: 14px 2px;
+      border-bottom: 1px solid #ece8df;
+    }
+    .row:last-child { border-bottom: 0; }
+    .row-main { min-width: 0; }
+    .row-title { overflow-wrap: anywhere; font-size: 16px; font-weight: 600; }
+    .row-id { margin-top: 5px; color: #77766f; font-size: 12px; }
+    .count {
+      flex: none;
+      padding: 7px 10px;
+      color: #6d493f;
+      background: #f3e8e2;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    .progress-track {
+      width: 100%;
+      height: 10px;
+      margin: 16px 0 12px;
+      overflow: hidden;
+      background: #e7e3da;
+      border-radius: 999px;
+    }
+    .progress-fill {
+      height: 100%;
+      background: #bf563d;
+      border-radius: inherit;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 22px;
+    }
+    .stat {
+      min-width: 0;
+      padding: 15px 16px;
+      background: #f6f4ee;
+      border-radius: 11px;
+    }
+    .stat-value { margin-top: 7px; overflow-wrap: anywhere; font-size: 17px; font-weight: 650; }
+    .result-list { margin-top: 18px; }
+    .result {
+      padding: 16px 0;
+      border-bottom: 1px solid #ece8df;
+    }
+    .result:last-child { border-bottom: 0; }
+    .result-title { font-size: 17px; font-weight: 650; line-height: 1.5; overflow-wrap: anywhere; }
+    .result-tags { margin-top: 7px; color: #77766f; font-size: 13px; line-height: 1.6; }
+    .archive-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .archive-chip {
+      padding: 7px 10px;
+      color: #6d493f;
+      background: #f3e8e2;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    .empty { margin: 24px 0 10px; color: #77766f; font-size: 15px; }
+    .text-message {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: 16px;
+      line-height: 1.75;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <header class="masthead">
+      <div class="brand"><span class="brand-mark"></span>JM COSMOS</div>
+      <div class="eyebrow">{{ eyebrow }}</div>
+    </header>
+
+    {% if card_type == "text" %}
+      <h1>{{ heading }}</h1>
+      <section class="details text-message">{{ body }}</section>
+      <footer class="footer">{{ footer }}</footer>
+    {% elif card_type == "download_result" %}
+      <h1>{{ heading }}</h1>
+      <p class="album-id">漫画 ID　{{ album_id }}</p>
+      <section class="details">
+        <div class="meta-label">作品</div>
+        <div class="meta-value">{{ title }}</div>
+        <div class="stats">
+          <div class="stat"><div class="meta-label">作者</div><div class="stat-value">{{ author }}</div></div>
+          <div class="stat"><div class="meta-label">章节</div><div class="stat-value">{{ photo_count }}</div></div>
+          <div class="stat"><div class="meta-label">图片</div><div class="stat-value">{{ image_count }}</div></div>
+          <div class="stat"><div class="meta-label">打包格式</div><div class="stat-value">{{ format_label }}</div></div>
+        </div>
+        {% if pack_status or encrypted %}
+          <div class="archive-line">
+            {% if pack_status %}<span class="archive-chip">{{ pack_status }}</span>{% endif %}
+            {% if encrypted %}<span class="archive-chip">已加密</span>{% endif %}
+          </div>
+        {% endif %}
+      </section>
+      <footer class="footer">{{ footer }}</footer>
+    {% elif card_type == "search_results" %}
+      <h1>{{ heading }}</h1>
+      <p class="album-id">搜索词　{{ query }}　·　第 {{ page }} 页</p>
+      {% if rows %}
+        <section class="result-list">
+          {% for row in rows %}
+            <div class="result">
+              <div class="result-title">{{ loop.index }}. {{ row.title }}</div>
+              <div class="row-id">ID {{ row.album_id }}{% if row.author %}　·　{{ row.author }}{% endif %}</div>
+              {% if row.tags %}<div class="result-tags">{{ row.tags }}</div>{% endif %}
+            </div>
+          {% endfor %}
+        </section>
+      {% else %}
+        <p class="empty">没有匹配的结果</p>
+      {% endif %}
+      <footer class="footer">{{ footer }}</footer>
+    {% elif card_type == "progress" %}
+      <h1>{{ heading }}</h1>
+      <p class="album-id">{{ status }}</p>
+      <section class="details">
+        <div class="meta-label">{{ unit }}</div>
+        <div class="progress-track"><div class="progress-fill" style="width: {{ percent }}%;"></div></div>
+        <div class="chapter-line">
+          <div class="meta-value">{{ current }} / {{ total }}</div>
+          <div class="count">{{ percent }}%</div>
+        </div>
+      </section>
+      <footer class="footer">{{ footer }}</footer>
+    {% elif card_type == "update" %}
+      <h1>{{ title }}</h1>
+      <p class="album-id">漫画 ID　{{ album_id }}</p>
+      <section class="details">
+        <div class="meta-label">章节更新</div>
+        <div class="chapter-line">
+          <div class="meta-value">{{ from_count }} 章</div>
+          <div class="arrow">→</div>
+          <div class="meta-value">{{ to_count }} 章</div>
+        </div>
+      </section>
+      <footer class="footer"><span class="footer-accent">{{ footer }}</span><span>{{ command }}</span></footer>
+    {% elif card_type == "subscription_list" %}
+      <h1>{{ heading }}</h1>
+      <p class="album-id">共 {{ total }} 项</p>
+      {% if rows %}
+        <section class="list">
+          {% for row in rows %}
+            <div class="row">
+              <div class="row-main">
+                <div class="row-title">{{ row.title }}</div>
+                <div class="row-id">ID {{ row.album_id }}</div>
+              </div>
+              <div class="count">{{ row.last_count }} 章</div>
+            </div>
+          {% endfor %}
+        </section>
+      {% else %}
+        <p class="empty">当前会话还没有订阅内容</p>
+      {% endif %}
+      <footer class="footer">{{ footer }}</footer>
+    {% else %}
+      <h1>{{ heading }}</h1>
+      <p class="album-id">漫画 ID　{{ album_id }}</p>
+      <section class="details">
+        <div class="meta-label">{{ detail }}</div>
+        <div class="meta-value">{{ title }}</div>
+      </section>
+      <footer class="footer">{{ footer }}</footer>
+    {% endif %}
+  </main>
+</body>
+</html>

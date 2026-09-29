@@ -134,6 +134,7 @@ async def send_with_recall(
     event: AstrMessageEvent,
     message_chain: MessageChain,
     delay: int = 60,
+    text_fallback_chain: MessageChain | None = None,
 ) -> None:
     """
     发送消息并在指定时间后自动撤回
@@ -142,6 +143,7 @@ async def send_with_recall(
         event: AstrBot消息事件
         message_chain: 要发送的消息链
         delay: 撤回延迟（秒），默认60秒
+        text_fallback_chain: 渲染图片对应的原始消息链，用于发送退化时保留文字
 
     Note:
         仅支持 aiocqhttp 平台（QQ/NapCat/Lagrange）
@@ -240,7 +242,7 @@ async def send_with_recall(
                     _cleanup_temp_files(temp_files)
 
             # 第二次回退：只发送文字（不带图片）
-            text_only_chain = _get_text_only_chain(message_chain)
+            text_only_chain = _get_text_only_chain(text_fallback_chain or message_chain)
             if text_only_chain:
                 try:
                     result = await do_send(text_only_chain)
@@ -257,6 +259,15 @@ async def send_with_recall(
 
         # 最后回退到普通发送
         logger.warning(f"send_with_recall 发送失败，回退到普通发送: {e}")
+        if text_fallback_chain:
+            text_only_chain = _get_text_only_chain(text_fallback_chain)
+            if text_only_chain:
+                try:
+                    await event.send(text_only_chain)
+                    logger.info("图片发送失败，已发送原始文字消息")
+                    return
+                except Exception as text_e:
+                    logger.warning(f"原始文字消息发送失败: {text_e}")
         try:
             await event.send(message_chain)
         except Exception as fallback_e:

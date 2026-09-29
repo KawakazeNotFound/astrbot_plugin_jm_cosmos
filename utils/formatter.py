@@ -306,21 +306,23 @@ day(今日) week(本周) month(本月) all(全部)
         Returns:
             格式化后的字符串
         """
-        lines = ["🔔 我的订阅", "━━━━━━━━━━━━━━━━━━━━━"]
+        lines = ["我的订阅", "─────────────────────"]
 
         if not subs:
-            lines.append("📭 暂无订阅")
+            lines.append("暂无订阅")
         else:
             for i, sub in enumerate(subs, 1):
                 title = sub.get("title") or "未知"
                 if len(title) > 30:
                     title = title[:27] + "..."
-                lines.append(f"{i}. 【{sub.get('album_id', '')}】{title}")
-                lines.append(f"   已记录章节: {sub.get('last_count', 0)}")
+                lines.append(f"{i}. {title}")
+                lines.append(
+                    f"   ID {sub.get('album_id', '')} · 已记录 {sub.get('last_count', 0)} 章"
+                )
 
-        lines.append("━━━━━━━━━━━━━━━━━━━━━")
-        lines.append("💡 /jmsub <ID> 订阅 · /jmunsub <ID> 取消订阅")
-        lines.append("💡 /jmupdate <ID> 下载新章节")
+        lines.append("─────────────────────")
+        lines.append("/jmsub <ID> 订阅 · /jmunsub <ID> 取消订阅")
+        lines.append("/jmupdate <ID> 下载新章节")
 
         return "\n".join(lines)
 
@@ -403,9 +405,9 @@ day(今日) week(本周) month(本月) all(全部)
             filled = int(bar_length * current / total)
             bar = "█" * filled + "░" * (bar_length - filled)
             count = f"{current}/{total} {unit}".rstrip()
-            return f"⏳ {status}\n[{bar}] {percent}% ({count})"
+            return f"{status}\n[{bar}] {percent}% ({count})"
         else:
-            return f"⏳ {status}..."
+            return f"{status}..."
 
     @staticmethod
     def format_help() -> str:
