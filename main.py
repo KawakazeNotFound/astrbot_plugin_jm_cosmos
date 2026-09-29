@@ -26,6 +26,7 @@ from .core import (
 from .core.download_queue import DownloadJobQueue
 from .utils import MessageFormatter, generate_album_filename, send_with_recall
 from .utils.message_rendering import render_plain_segments, strip_leading_emoji_markers
+from .utils.notification_rendering import estimate_notification_clip
 
 # 插件名称常量
 PLUGIN_NAME = "jm_cosmos2"
@@ -35,7 +36,7 @@ PLUGIN_NAME = "jm_cosmos2"
     "jm_cosmos2",
     "GEMILUXVII",
     "JM漫画下载插件 - 支持搜索、下载禁漫天堂的漫画本子，支持加密PDF/ZIP打包",
-    "2.7.8-ImageRender",
+    "2.7.9-ImageRender",
     "https://github.com/KawakazeNotFound/astrbot_plugin_jm_cosmos",
 )
 class JMCosmosPlugin(Star):
@@ -169,7 +170,11 @@ class JMCosmosPlugin(Star):
                 template,
                 safe_data,
                 return_url=True,
-                options={"type": "png"},
+                options={
+                    "type": "png",
+                    "full_page": True,
+                    "clip": estimate_notification_clip(data),
+                },
             )
             return str(image) if image else None
         except Exception as exc:
