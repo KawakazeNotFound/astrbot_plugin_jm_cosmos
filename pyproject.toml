@@ -9,3 +9,6 @@ dependencies = [
     "pymupdf>=1.23.0",
     "pyzipper>=0.3.6",
 ]
+
+[project.urls]
+Repository = "https://github.com/KawakazeNotFound/astrbot_plugin_jm_cosmos"
