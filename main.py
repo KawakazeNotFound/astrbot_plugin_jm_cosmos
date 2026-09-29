@@ -30,13 +30,15 @@ from .utils.notification_rendering import estimate_notification_clip
 
 # 插件名称常量
 PLUGIN_NAME = "jm_cosmos2"
+_INFO_DETAIL_TIMEOUT_SECONDS = 30
+_INFO_COVER_TIMEOUT_SECONDS = 15
 
 
 @register(
     "jm_cosmos2",
     "GEMILUXVII",
     "JM漫画下载插件 - 支持搜索、下载禁漫天堂的漫画本子，支持加密PDF/ZIP打包",
-    "2.7.9-ImageRender",
+    "2.7.10-ImageRender",
     "https://github.com/KawakazeNotFound/astrbot_plugin_jm_cosmos",
 )
 class JMCosmosPlugin(Star):
@@ -783,7 +785,10 @@ class JMCosmosPlugin(Star):
                 event, f"📖 正在获取本子 {album_id} 的详情..."
             )
 
-            detail = await self.browser.get_album_detail(album_id)
+            detail = await asyncio.wait_for(
+                self.browser.get_album_detail(album_id),
+                timeout=_INFO_DETAIL_TIMEOUT_SECONDS,
+            )
 
             if not detail:
                 yield await self._text_result(
@@ -794,7 +799,16 @@ class JMCosmosPlugin(Star):
             # 根据配置决定是否发送封面图片
             if self.config_manager.send_cover_preview:
                 cover_dir = self.config_manager.download_dir / "covers"
-                cover_path = await self.browser.get_album_cover(album_id, cover_dir)
+                try:
+                    cover_path = await asyncio.wait_for(
+                        self.browser.get_album_cover(album_id, cover_dir),
+                        timeout=_INFO_COVER_TIMEOUT_SECONDS,
+                    )
+                except Exception as cover_err:
+                    logger.warning(
+                        f"获取本子 {album_id} 封面预览失败，继续发送详情: {cover_err}"
+                    )
+                    cover_path = None
 
                 if cover_path and cover_path.exists():
                     # 构建封面消息链
